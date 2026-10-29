@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Conversor MKV → MP4 + subtítulos MKS</title>
+<style>
+:root{--bg:#f6f7fb;--card:#fff;--tx:#1b1f2a;--mu:#64708a;--bd:#d9deea;--ac:#4f46e5;--ac2:#fff;--ok:#16794c;--er:#b42318;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#12141c;--card:#1b1e29;--tx:#e8eaf2;--mu:#98a2bd;--bd:#2d3244;--ac:#8b85ff;--ac2:#10121a;--ok:#4cc38a;--er:#ff8a80}}
+:root[data-theme="dark"]{--bg:#12141c;--card:#1b1e29;--tx:#e8eaf2;--mu:#98a2bd;--bd:#2d3244;--ac:#8b85ff;--ac2:#10121a;--ok:#4cc38a;--er:#ff8a80}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:640px;margin:0 auto;padding:20px 16px 40px}
+h1{font-size:1.5rem;margin:.2em 0}
+p.sub{color:var(--mu);margin:0 0 18px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:16px;margin-bottom:14px}
+.card h2{font-size:1rem;margin:0 0 4px}
+.card small{color:var(--mu);display:block;margin-bottom:10px}
+.drop{border:2px dashed var(--bd);border-radius:10px;padding:16px;text-align:center;cursor:pointer;color:var(--mu);word-break:break-all}
+.drop.on{border-color:var(--ac);color:var(--tx)}
+.drop input{display:none}
+label.f{display:flex;align-items:center;gap:8px;margin-top:10px;color:var(--mu)}
+select{background:var(--bg);color:var(--tx);border:1px solid var(--bd);border-radius:8px;padding:6px 8px;font:inherit}
+button{font:inherit;border:0;border-radius:10px;padding:12px 18px;background:var(--ac);color:var(--ac2);font-weight:600;cursor:pointer}
+button.sec{background:transparent;color:var(--tx);border:1px solid var(--bd)}
+button:disabled{opacity:.45;cursor:not-allowed}
+.row{display:flex;gap:10px;flex-wrap:wrap}
+progress{width:100%;height:12px;margin-top:12px}
+#msg{margin-top:10px;white-space:pre-wrap;word-break:break-word}
+.ok{color:var(--ok)}.er{color:var(--er)}.mu{color:var(--mu);font-size:.9rem}
+</style>
+</head>
+<body>
+<main>
+<h1>🎬 MKV → MP4</h1>
+<p class="sub">Convierte en tu navegador y, si quieres, integra subtítulos MKS. Tus archivos no se suben a ningún servidor.</p>
+
+<div class="card">
+<h2>1. Video MKV</h2><small>Archivo .mkv a convertir</small>
+<label class="drop" id="d1"><span id="n1">Toca o arrastra tu archivo .mkv</span><input type="file" id="f1" accept=".mkv,video/x-matroska"></label>
+</div>
+
+<div class="card">
+<h2>2. Subtítulos (opcional)</h2><small>Archivo .mks (también acepta .srt, .vtt y .ass)</small>
+<label class="drop" id="d2"><span id="n2">Toca o arrastra tu archivo .mks</span><input type="file" id="f2" accept=".mks,.srt,.vtt,.ass,.ssa"></label>
+<label class="f">Idioma de los subtítulos:
+<select id="lang"><option value="spa">Español</option><option value="eng">Inglés</option><option value="por">Portugués</option><option value="fra">Francés</option><option value="ita">Italiano</option><option value="deu">Alemán</option><option value="jpn">Japonés</option><option value="und">Sin especificar</option></select></label>
+</div>
+
+<div class="row">
+<button id="go" disabled>Convertir a MP4</button>
+<button id="stop" class="sec" disabled>Cancelar</button>
+<button id="save" class="sec" style="display:none">Guardar MP4</button>
+</div>
+<progress id="bar" value="0" max="100" style="display:none"></progress>
+<div id="msg"></div>
+<p class="mu">Funciona mejor en Chrome o Edge. En Chrome y Edge el MP4 se guarda directo en tu disco (eliges dónde al empezar), así que aguanta archivos de varios GB. En otros navegadores se arma en memoria y solo sirve para archivos pequeños. Los subtítulos se guardan como pista WebVTT seleccionable (los estilos ASS no se conservan).</p>
+</main>
+
+<script>
+const MB_URLS=["https://cdn.jsdelivr.net/npm/mediabunny@1.44.1/+esm","https://cdn.jsdelivr.net/npm/mediabunny@1/+esm","https://esm.sh/mediabunny@1.44.1"];
+const $=id=>document.getElementById(id);
+let mkv=null,sub=null,conv=null,blob=null,outName="video.mp4",ready=false;
+
+async function loadMB(){
+  if(window.Mediabunny)return;
+  const errs=[];
+  for(const u of MB_URLS){
+    try{
+      const m=await import(u);
+      if(m&&m.Conversion){window.Mediabunny=m;return;}
+      errs.push(u+" → cargó pero no trae Conversion");
+    }catch(e){errs.push(u+" → "+((e&&e.message)||e));}
+  }
+  throw new Error("No se pudo cargar la librería de conversión.\n"+errs.join("\n"));
+}
+
+function msg(t,c){const m=$("msg");m.textContent=t;m.className=c||"";}
+function refresh(){$("go").disabled=!(mkv&&ready)||!!conv;}
+
+function bindDrop(dz,inp,name,cb,ph){
+  const set=f=>{if(!f)return;cb(f);$(name).textContent=f.name;dz.classList.add("on");refresh();};
+  inp.addEventListener("change",()=>set(inp.files[0]));
+  ["dragover","dragenter"].forEach(e=>dz.addEventListener(e,ev=>{ev.preventDefault();}));
+  dz.addEventListener("drop",ev=>{ev.preventDefault();set(ev.dataTransfer.files[0]);});
+}
+bindDrop($("d1"),$("f1"),"n1",f=>{mkv=f;blob=null;$("save").style.display="none";outName=f.name.replace(/\.mkv$/i,"")+".mp4";});
+bindDrop($("d2"),$("f2"),"n2",f=>{sub=f;});
+
+/* ---------- Subtítulos ---------- */
+const toVtt=t=>"WEBVTT\n\n"+t.replace(/\r/g,"").replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g,"$1.$2");
+const pad=(n,l=2)=>String(Math.floor(n)).padStart(l,"0");
+function srtTime(ms){ms=Math.max(0,Math.round(ms));return `${pad(ms/3600000)}:${pad(ms/60000%60)}:${pad(ms/1000%60)},${pad(ms%1000,3)}`;}
+function cuesToSrt(c){c.sort((a,b)=>a.s-b.s);return c.filter(x=>x.t.trim()).map((x,i)=>`${i+1}\n${srtTime(x.s)} --> ${srtTime(x.e)}\n${x.t.trim()}\n`).join("\n");}
+const cleanAss=t=>t.replace(/\{[^}]*\}/g,"").replace(/\\[Nn]/g,"\n").replace(/\\h/g," ");
+
+function parseAss(text){
+  const cues=[],tm=s=>{const m=s.trim().match(/(\d+):(\d+):(\d+)[.](\d+)/);return m?((+m[1]*60+ +m[2])*60+ +m[3])*1000+Number(("0."+m[4]))*1000:0;};
+  for(const l of text.split(/\r?\n/)){
+    if(!/^Dialogue:/i.test(l))continue;
+    const p=l.replace(/^Dialogue:\s*/i,"").split(",");
+    if(p.length<10)continue;
+    cues.push({s:tm(p[1]),e:tm(p[2]),t:cleanAss(p.slice(9).join(","))});
+  }
+  return cuesToSrt(cues);
+}
+
+/* Lector mínimo de Matroska (.mks): extrae pistas de texto y las convierte a SRT */
+const MASTER=new Set([0x18538067,0x1549A966,0x1654AE6B,0xAE,0x1F43B675,0xA0]);
+function vint(b,p,keep){
+  const f=b[p];let len=1,m=0x80;
+  while(len<=8&&!(f&m)){len++;m>>=1;}
+  if(len>8)throw new Error("EBML inválido");
+  let v=keep?f:(f&(m-1)),unk=(f&(m-1))===(m-1);
+  for(let i=1;i<len;i++){v=v*256+b[p+i];if(b[p+i]!==0xFF)unk=false;}
+  return{v,len,unk};
+}
+function parseMks(ab){
+  const b=new Uint8Array(ab),td=new TextDecoder("utf-8"),tracks={},blocks=[];
+  let p=0,scale=1e6,cur=null,ct=0;
+  const uint=(s,n)=>{let v=0;for(let i=0;i<n;i++)v=v*256+b[s+i];return v;};
+  while(p<b.length){
+    let id,sz;
+    try{id=vint(b,p,true);sz=vint(b,p+id.len,false);}catch(e){break;}
+    const ds=p+id.len+sz.len,I=id.v;
+    if(MASTER.has(I)){if(I===0xAE)cur={};p=ds;continue;}
+    if(sz.unk)break;
+    const end=Math.min(ds+sz.v,b.length);
+    if(I===0x2AD7B1)scale=uint(ds,sz.v);
+    else if(I===0xD7&&cur){cur.num=uint(ds,sz.v);tracks[cur.num]=cur;}
+    else if(I===0x86&&cur)cur.codec=td.decode(b.subarray(ds,end));
+    else if(I===0xE7)ct=uint(ds,sz.v);
+    else if(I===0xA3||I===0xA1){
+      const tn=vint(b,ds,false),o=ds+tn.len,rel=(b[o]<<8)|b[o+1];
+      blocks.push({tn:tn.v,t:(ct+(rel>=32768?rel-65536:rel))*scale/1e6,d:0,data:b.subarray(o+3,end)});
+    }
+    else if(I===0x9B&&blocks.length)blocks[blocks.length-1].d=uint(ds,sz.v)*scale/1e6;
+    p=end;
+  }
+  const out=[];
+  for(const n in tracks){
+    const tr=tracks[n];
+    if(!tr.codec||!tr.codec.startsWith("S_TEXT"))continue;
+    const bl=blocks.filter(x=>x.tn==n).sort((a,c)=>a.t-c.t),cues=[];
+    bl.forEach((x,i)=>{
+      let t=td.decode(x.data);
+      if(/ASS|SSA/.test(tr.codec))t=cleanAss(t.split(",").slice(8).join(","));
+      const e=x.d>0?x.t+x.d:(bl[i+1]?Math.min(bl[i+1].t,x.t+5000):x.t+3000);
+      cues.push({s:x.t,e,t});
+    });
+    const srt=cuesToSrt(cues);
+    if(srt)out.push(srt);
+  }
+  return out;
+}
+
+async function loadSubs(file){
+  const ext=file.name.split(".").pop().toLowerCase();
+  if(ext==="mks"){
+    const tracks=parseMks(await file.arrayBuffer());
+    if(!tracks.length)throw new Error("El archivo MKS no contiene pistas de subtítulos de texto compatibles (los subtítulos de imagen, como PGS, no se pueden usar).");
+    return tracks.map(t=>({text:toVtt(t),codec:"webvtt"}));
+  }
+  const txt=(await file.text()).replace(/^\uFEFF/,"");
+  if(ext==="srt")return[{text:toVtt(txt),codec:"webvtt"}];
+  if(ext==="vtt")return[{text:txt,codec:"webvtt"}];
+  if(ext==="ass"||ext==="ssa"){const s=parseAss(txt);if(!s)throw new Error("No se encontraron diálogos en el archivo ASS.");return[{text:toVtt(s),codec:"webvtt"}];}
+  throw new Error("Formato de subtítulos no compatible.");
+}
+
+/* ---------- Conversión ---------- */
+$("go").addEventListener("click",async()=>{
+  const M=window.Mediabunny;
+  let handle=null,writable=null;
+  if(window.showSaveFilePicker){
+    try{handle=await window.showSaveFilePicker({suggestedName:outName,types:[{description:"Video MP4",accept:{"video/mp4":[".mp4"]}}]});}
+    catch(e){if(e&&e.name==="AbortError")return;handle=null;}
+  }
+  if(!handle&&mkv.size>1.5*1024**3){msg("Este archivo es muy grande y tu navegador no permite guardar directo en el disco. Usa Chrome o Edge en una computadora.","er");return;}
+  $("save").style.display="none";blob=null;
+  $("bar").style.display="block";$("bar").value=0;
+  $("stop").disabled=false;$("go").disabled=true;
+  msg("Preparando…");
+  try{
+    const subs=sub?await loadSubs(sub):[];
+    const input=new M.Input({source:new M.BlobSource(mkv),formats:M.ALL_FORMATS});
+    let target;
+    if(handle){writable=await handle.createWritable();target=new M.StreamTarget(writable);}
+    else target=new M.BufferTarget();
+    const output=new M.Output({format:new M.Mp4OutputFormat(),target});
+    const lang=$("lang").value,srcs=[];
+    conv=await M.Conversion.init({input,output});
+    for(const s of subs){
+      const ts=new M.TextSubtitleSource(s.codec);
+      output.addSubtitleTrack(ts,{languageCode:lang});
+      srcs.push({ts,text:s.text});
+    }
+    const dis=(conv.discardedTracks||[]).map(d=>`• Pista omitida (${(d.track&&(d.track.type||d.track.codec))||"?"}): ${d.reason}`);
+    if(!conv.isValid)throw new Error("No se pudo convertir este archivo.\n"+dis.join("\n"));
+    const closeAll=()=>srcs.forEach(s=>{try{s.ts.close();}catch(e){}});
+    let wd=null,wd2=null,runDone=false,feedDone=false,feedErr=null;
+    const info=(conv.utilizedTracks||[]).map(t=>`${t.type||"?"}:${t.codec||"?"}`).join(", ");
+    conv.onProgress=p=>{
+      $("bar").value=p*100;
+      if(p>=0.99){msg("Finalizando el MP4… (puede tardar un poco)\nPistas: "+info);if(!wd){wd=setTimeout(closeAll,6000);wd2=setTimeout(()=>msg(`Sigue finalizando… (conversión: ${runDone?"lista":"pendiente"}, subtítulos: ${feedDone?"listos":"pendientes"}).\nSi no avanza, cópiame este mensaje.\nPistas: ${info}`),25000);}}
+      else msg(`Convirtiendo… ${Math.floor(p*100)}%\nPistas: ${info}`);
+    };
+    msg("Convirtiendo…\nPistas: "+info);
+    const run=conv.execute().then(()=>{runDone=true;});
+    (async()=>{for(const s of srcs){await s.ts.add(s.text);}feedDone=true;closeAll();})().catch(e=>{feedErr=e;});
+    try{await run;}finally{if(wd)clearTimeout(wd);if(wd2)clearTimeout(wd2);}
+    let sizeMB=0;
+    if(handle){try{await writable.close();}catch(e){}try{sizeMB=(await handle.getFile()).size/1048576;}catch(e){}blob=null;}
+    else{blob=new Blob([output.target.buffer],{type:"video/mp4"});sizeMB=blob.size/1048576;}
+    $("bar").value=100;
+    msg(`✅ Listo: ${outName} (${sizeMB.toFixed(1)} MB)${handle?" · guardado donde elegiste":""}`+(subs.length?(feedErr?"\n⚠ Subtítulos no integrados: "+(feedErr.message||feedErr):(feedDone?`\nSubtítulos integrados: ${subs.length} pista(s).`:"\n⚠ No se pudo confirmar que los subtítulos se integraran.")):"")+(dis.length?"\n"+dis.join("\n"):""),"ok");
+    if(!handle)$("save").style.display="inline-block";
+  }catch(e){
+    try{if(writable)await writable.abort();}catch(x){}
+    msg(conv===null||String(e&&e.message).includes("cancel")?("Cancelado o con error: "+(e&&e.message||e)):("Error: "+(e&&e.message||e)),"er");
+  }finally{conv=null;$("stop").disabled=true;refresh();}
+});
+
+$("stop").addEventListener("click",async()=>{try{if(conv)await conv.cancel();}catch(e){}msg("Conversión cancelada.","er");});
+
+$("save").addEventListener("click",()=>{
+  if(!blob)return;
+  const a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);a.download=outName;
+  document.body.appendChild(a);a.click();a.remove();
+  setTimeout(()=>URL.revokeObjectURL(a.href),60000);
+  msg("Descarga iniciada ✔","ok");
+});
+
+loadMB().then(()=>{ready=true;refresh();}).catch(e=>msg(e.message,"er"));
+</script>
+</body>
+</html>
