@@ -48,6 +48,7 @@ progress{width:100%;height:12px;margin-top:12px}
 <select id="lang"><option value="spa">Español</option><option value="eng">Inglés</option><option value="por">Portugués</option><option value="fra">Francés</option><option value="ita">Italiano</option><option value="deu">Alemán</option><option value="jpn">Japonés</option><option value="und">Sin especificar</option></select></label>
 </div>
 
+<label class="f" style="margin:0 0 12px"><input type="checkbox" id="copy" checked> Solo copiar las pistas, sin decodificar (recomendado: evita que Windows pida el complemento HEVC y es mucho más rápido)</label>
 <div class="row">
 <button id="go" disabled>Convertir a MP4</button>
 <button id="stop" class="sec" disabled>Cancelar</button>
@@ -55,6 +56,13 @@ progress{width:100%;height:12px;margin-top:12px}
 </div>
 <progress id="bar" value="0" max="100" style="display:none"></progress>
 <div id="msg"></div>
+<div class="card">
+<h2>¿Tu video es HEVC (H.265) o muy pesado?</h2>
+<small>Si el navegador te pide un complemento de HEVC o se traba, usa la versión de Windows: copia el video sin decodificarlo, así que no necesita complementos y aguanta archivos de varios GB.</small>
+<a href="convertir_mkv_a_mp4.bat" download style="display:inline-block;background:var(--ac);color:var(--ac2);font-weight:600;border-radius:10px;padding:10px 16px;text-decoration:none">Descargar versión para Windows (.bat)</a>
+<p class="mu" style="margin:10px 0 0">Arrastra tu .mkv (y tu .mks si quieres subtítulos) sobre el archivo descargado.</p>
+</div>
+
 <p class="mu">Funciona mejor en Chrome o Edge. En Chrome y Edge el MP4 se guarda directo en tu disco (eliges dónde al empezar), así que aguanta archivos de varios GB. En otros navegadores se arma en memoria y solo sirve para archivos pequeños. Los subtítulos se guardan como pista WebVTT seleccionable (los estilos ASS no se conservan).</p>
 </main>
 
@@ -62,6 +70,7 @@ progress{width:100%;height:12px;margin-top:12px}
 const MB_URLS=["https://cdn.jsdelivr.net/npm/mediabunny@1.44.1/+esm","https://cdn.jsdelivr.net/npm/mediabunny@1/+esm","https://esm.sh/mediabunny@1.44.1"];
 const $=id=>document.getElementById(id);
 let mkv=null,sub=null,conv=null,blob=null,outName="video.mp4",ready=false;
+let stopped=false,curOut=null;
 
 async function loadMB(){
   if(window.Mediabunny)return;
@@ -172,6 +181,7 @@ async function loadSubs(file){
 /* ---------- Conversión ---------- */
 $("go").addEventListener("click",async()=>{
   const M=window.Mediabunny;
+  stopped=false;
   let handle=null,writable=null;
   if(window.showSaveFilePicker){
     try{handle=await window.showSaveFilePicker({suggestedName:outName,types:[{description:"Video MP4",accept:{"video/mp4":[".mp4"]}}]});}
@@ -189,17 +199,59 @@ $("go").addEventListener("click",async()=>{
     if(handle){writable=await handle.createWritable();target=new M.StreamTarget(writable);}
     else target=new M.BufferTarget();
     const output=new M.Output({format:new M.Mp4OutputFormat(),target});
+    curOut=output;
     const lang=$("lang").value,srcs=[];
+    let dis=[],feedDone=false,feedErr=null;
+    const closeAll=()=>srcs.forEach(s=>{try{s.ts.close();}catch(e){}});
+    if($("copy").checked){
+      const vt=await input.getPrimaryVideoTrack();
+      if(!vt||!vt.codec)throw new Error("No se encontró una pista de video compatible con MP4 en este archivo.");
+      const dur=await input.computeDuration();
+      const plan=[],vs=new M.EncodedVideoPacketSource(vt.codec);
+      output.addVideoTrack(vs);
+      plan.push([vt,vs,true]);
+      const parts=["video:"+vt.codec];
+      for(const at of await input.getAudioTracks()){
+        try{
+          const as=new M.EncodedAudioPacketSource(at.codec);
+          output.addAudioTrack(as);
+          plan.push([at,as,false]);parts.push("audio:"+at.codec);
+        }catch(e){dis.push(`• Audio omitido (${at.codec}): no es compatible con MP4 sin re-codificar.`);}
+      }
+      for(const s of subs){
+        const ts=new M.TextSubtitleSource(s.codec);
+        output.addSubtitleTrack(ts,{languageCode:lang});
+        srcs.push({ts,text:s.text});
+      }
+      const pump=(track,source,isV)=>{
+        const sink=new M.EncodedPacketSink(track);
+        return(async()=>{
+          const cfg=await track.getDecoderConfig();
+          for await(const pk of sink.packets()){
+            if(stopped)break;
+            await source.add(pk,cfg?{decoderConfig:cfg}:undefined);
+            if(isV&&dur>0){const q=Math.min(0.99,pk.timestamp/dur);$("bar").value=q*100;msg(`Copiando… ${Math.floor(q*100)}%\nPistas: ${parts.join(", ")}`);}
+          }
+          source.close();
+        })();
+      };
+      msg("Copiando…\nPistas: "+parts.join(", "));
+      await output.start();
+      const feed=(async()=>{for(const s of srcs){await s.ts.add(s.text);}feedDone=true;closeAll();})().catch(e=>{feedErr=e;closeAll();});
+      await Promise.all([...plan.map(x=>pump(...x)),feed]);
+      if(stopped)throw new Error("cancelado");
+      msg("Finalizando el MP4…");
+      await output.finalize();
+    }else{
     conv=await M.Conversion.init({input,output});
     for(const s of subs){
       const ts=new M.TextSubtitleSource(s.codec);
       output.addSubtitleTrack(ts,{languageCode:lang});
       srcs.push({ts,text:s.text});
     }
-    const dis=(conv.discardedTracks||[]).map(d=>`• Pista omitida (${(d.track&&(d.track.type||d.track.codec))||"?"}): ${d.reason}`);
+    dis=(conv.discardedTracks||[]).map(d=>`• Pista omitida (${(d.track&&(d.track.type||d.track.codec))||"?"}): ${d.reason}`);
     if(!conv.isValid)throw new Error("No se pudo convertir este archivo.\n"+dis.join("\n"));
-    const closeAll=()=>srcs.forEach(s=>{try{s.ts.close();}catch(e){}});
-    let wd=null,wd2=null,runDone=false,feedDone=false,feedErr=null;
+    let wd=null,wd2=null,runDone=false;
     const info=(conv.utilizedTracks||[]).map(t=>`${t.type||"?"}:${t.codec||"?"}`).join(", ");
     conv.onProgress=p=>{
       $("bar").value=p*100;
@@ -210,6 +262,7 @@ $("go").addEventListener("click",async()=>{
     const run=conv.execute().then(()=>{runDone=true;});
     (async()=>{for(const s of srcs){await s.ts.add(s.text);}feedDone=true;closeAll();})().catch(e=>{feedErr=e;});
     try{await run;}finally{if(wd)clearTimeout(wd);if(wd2)clearTimeout(wd2);}
+    }
     let sizeMB=0;
     if(handle){try{await writable.close();}catch(e){}try{sizeMB=(await handle.getFile()).size/1048576;}catch(e){}blob=null;}
     else{blob=new Blob([output.target.buffer],{type:"video/mp4"});sizeMB=blob.size/1048576;}
@@ -218,11 +271,11 @@ $("go").addEventListener("click",async()=>{
     if(!handle)$("save").style.display="inline-block";
   }catch(e){
     try{if(writable)await writable.abort();}catch(x){}
-    msg(conv===null||String(e&&e.message).includes("cancel")?("Cancelado o con error: "+(e&&e.message||e)):("Error: "+(e&&e.message||e)),"er");
-  }finally{conv=null;$("stop").disabled=true;refresh();}
+    msg(stopped?"Conversión cancelada.":("Error: "+(e&&e.message||e)),"er");
+  }finally{conv=null;curOut=null;$("stop").disabled=true;refresh();}
 });
 
-$("stop").addEventListener("click",async()=>{try{if(conv)await conv.cancel();}catch(e){}msg("Conversión cancelada.","er");});
+$("stop").addEventListener("click",async()=>{stopped=true;try{if(conv)await conv.cancel();}catch(e){}try{if(curOut)await curOut.cancel();}catch(e){}msg("Conversión cancelada.","er");});
 
 $("save").addEventListener("click",()=>{
   if(!blob)return;
